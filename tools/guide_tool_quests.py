@@ -540,9 +540,7 @@ class GuideToolQuestMixin:
                 if giver['areaId']:
                     area_id = giver['areaId']
                     cursor.execute(
-                        "SELECT ID FROM "
-                        "acore_world"
-                        ".areatable_dbc "
+                        "SELECT ID FROM areatable_dbc "
                         "WHERE ID = %s",
                         (area_id,)
                     )

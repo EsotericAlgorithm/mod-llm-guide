@@ -356,7 +356,9 @@ class LLMBridge:
         ).lower()
 
         # Game data tool executor for Claude tool use
-        self.tool_executor = GameToolExecutor(self.db_config)
+        self.tool_executor = GameToolExecutor(
+            self.db_config, world_database=get_config_value(
+                config, "LLMGuide.Database.WorldName", "acore_world"))
         self.tool_executor.distance_unit = self.distance_unit
         self.request_timeout = max(10, get_config_int(
             config, "LLMGuide.Bridge.RequestTimeoutSeconds", 120))

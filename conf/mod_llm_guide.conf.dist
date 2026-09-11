@@ -316,6 +316,15 @@ LLMGuide.Database.Password = acore
 LLMGuide.Database.Name = acore_characters
 
 #
+#   LLMGuide.Database.WorldName
+#       World database used by game-data tools. Shares the connection settings
+#       above; the database account must have read access to this database.
+#       Restart the Python bridge after changing this setting.
+#       Default: acore_world
+#
+LLMGuide.Database.WorldName = acore_world
+
+#
 #   LLMGuide.Bridge.PollIntervalSeconds
 #       How often the Python bridge checks for new questions
 #       Default: 2

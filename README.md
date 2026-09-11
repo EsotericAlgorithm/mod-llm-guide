@@ -430,6 +430,8 @@ Key settings in `mod_llm_guide.conf`:
 | `LLMGuide.Google.ApiKey` | -- | Your Google Gemini API key |
 | `LLMGuide.OpenRouter.ApiKey` | -- | Your OpenRouter API key |
 | `LLMGuide.Database.Host` | localhost | Use `ac-database` for Docker |
+| `LLMGuide.Database.Name` | acore_characters | Characters database for requests and memories |
+| `LLMGuide.Database.WorldName` | acore_world | World database for game-data lookups; restart the bridge after changing |
 | `LLMGuide.CooldownSeconds` | 10 | Seconds between questions |
 | `LLMGuide.MaxTokens` | 300 | Max response tokens |
 | `LLMGuide.Temperature` | 0.7 | Creativity (0.0-1.0) |

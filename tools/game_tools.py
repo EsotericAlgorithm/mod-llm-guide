@@ -718,8 +718,9 @@ class GameToolExecutor(
     # 1 WoW unit = 1 yard = 0.9144 meters
     YARD_TO_METER = 0.9144
 
-    def __init__(self, db_config: dict):
+    def __init__(self, db_config: dict, world_database: str = 'acore_world'):
         self.db_config = db_config
+        self.world_database = world_database
         self.default_zone = None  # Player's current zone, set before processing
         self.player_x = None
         self.player_y = None
@@ -932,7 +933,7 @@ class GameToolExecutor(
         """Get database connection."""
         import mysql.connector
         world_config = self.db_config.copy()
-        world_config['database'] = 'acore_world'
+        world_config['database'] = self.world_database
         return mysql.connector.connect(**world_config)
 
     def _creature_entry_column(self, conn):
@@ -950,7 +951,7 @@ class GameToolExecutor(
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-                "WHERE TABLE_SCHEMA = 'acore_world' "
+                "WHERE TABLE_SCHEMA = DATABASE() "
                 "AND TABLE_NAME = 'creature' "
                 "AND COLUMN_NAME IN ('id', 'id1') "
                 "ORDER BY (COLUMN_NAME = 'id') DESC LIMIT 1"
