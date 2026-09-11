@@ -72,7 +72,12 @@ Every item, quest, spell, and NPC name in responses becomes a clickable WoW link
 ## Features
 
 ### Real Answers from Your Server
-Every answer comes from your actual game database, not from AI memory or training data. When the guide says [Riverpaw Leather Vest] drops from [Hogger] at 15%, that's the real drop rate on your server. No guesswork, no approximations, no outdated information.
+Factual questions require a tool lookup. Answers must use entity links returned
+by tools, and empty answers or answers supported only by failed lookups are
+rejected. The model still writes the explanation: these checks reduce errors
+but do not prove every sentence correct. Loot weights, grouped/reference loot,
+server rates and conditional drops must not be confused with an effective
+player-specific drop probability.
 
 ### Closest Results First
 Ask "where can I learn cooking?" and the guide shows the nearest trainer first, with the area they're in and map coordinates: *"Zarrin in Dolanaar (~15 m southeast at 57.1, 61.3)"*. Works with GPS addons. Supports yards or meters (configurable).
@@ -138,7 +143,7 @@ planning what to do next.
 ## Requirements
 
 - AzerothCore WotLK (3.3.5a)
-- Python 3.8+
+- Python 3.10+
 - An API key from [Anthropic](https://console.anthropic.com/),
   [OpenAI](https://platform.openai.com/),
   [Google AI Studio](https://aistudio.google.com/app/apikey), or
@@ -245,6 +250,8 @@ Use `.ag` for both normal questions and saved-history navigation.
 .ag show 1
 .ag show 11
 .ag clear
+.ag status
+.ag cancel
 ```
 
 ### Commands
@@ -258,6 +265,8 @@ Use `.ag` for both normal questions and saved-history navigation.
 | `.ag history <count> page <number>` | Move to a specific history page while also choosing how many entries to show per page, up to 10 |
 | `.ag show <number>` | Open one saved interaction by its history number and show the full stored question and full stored answer |
 | `.ag clear` | Clear this character's saved guide conversation history |
+| `.ag status` | Show outstanding requests without making a provider call |
+| `.ag cancel` | Cancel outstanding requests; late worker replies are discarded |
 
 ### History Navigation
 
@@ -294,6 +303,122 @@ That will open the full saved question and full saved answer for entry
 
 ## Configuration
 
+When upgrading, start the updated bridge before using the updated C++ module.
+Bridge startup preserves existing data, widens character context storage and
+adds the snapshot and request-recovery columns automatically. Its database
+account needs ALTER permission. Full character snapshots and the status/cancel
+commands require the updated C++ module to be built and installed.
+
+Request timeouts, retry limits, worker count and gear comparison filters are
+documented in `conf/mod_llm_guide.conf.dist`. Worldserver settings use
+`.reload config`; bridge settings require a bridge restart. Gear comparisons
+show base-stat tradeoffs and known requirements, not simulated performance;
+gems, enchants, set bonuses, procs and source accessibility need further checks.
+
+Equipment summaries label the actual worn slots (including separate rings,
+trinkets and back) and provide verified item links. Profession summaries include
+primary professions, Fishing, Cooking and First Aid; Riding is listed separately
+as a travel skill, and racial skills are not listed as professions. These context
+improvements require the updated C++ module.
+
+The bridge links exact, unambiguous item names from the current request's tool
+results, without inventing IDs. Comparison tools retain base-stat deltas,
+required levels and acquisition source leads for the answer model. An optional
+diagnostic appendix can repeat them in full. Unknown sources remain explicit. These checks
+do not establish affordability, dungeon access, character DPS or pet scaling,
+and candidates are not an exhaustive best-in-slot ranking.
+
+Tool defaults are injected only into fields accepted by that tool's schema.
+The bridge can restore canonical link formatting when the entity type, ID and
+normalized name agree with current tool evidence. Unknown IDs, different names
+and ambiguous matches remain rejected; rejected-link logs identify the entity
+type and ID for diagnosis.
+
+Shared question routing covers all registered guide tools. Narrow exact requests
+can select a lookup directly; other factual questions use a classifier call on
+the configured provider/model. Its complete plan is validated against existing
+tool schemas before any lookup executes. Ambiguous or invalid plans ask for
+clarification. Lookup results feed the answer stage, which can request further
+tools. Routing shares the request deadline and can add latency and token cost.
+
+Service routing uses canonical categories, not fuzzy title matching. Flight
+masters are located by their database NPC flag, including Gryphon Masters.
+Travel route data remains incomplete: routing does not prove a fastest route or
+which flight nodes a character has unlocked. Model intent selection can still
+be wrong; validation constrains calls but does not guarantee interpretation.
+
+Answer-readiness checks run locally before each answer round, without a
+separate model review call. They track failed, empty and unresolved lookups;
+missing service-NPC distances; unavailable character snapshots; incomplete
+upgrade comparisons; and the limits of travel data. The existing tool loop can
+fill gaps within its normal deadline and round budget. Unresolved limitations
+are retained in the final response. If no lookup produced usable information,
+a deterministic limitation message replaces the model's answer without
+exposing backend errors. Identical successful retries clear earlier failures;
+different searches remain separate, and all checks reset with each request.
+
+These checks recognize known result formats, not arbitrary natural-language
+intent or every possible factual contradiction. They do not prove that the
+selected tools fully answer the player's question. New tool output formats
+should update the readiness rules and their regression tests.
+
+All unresolved answer links are checked, including references previously
+mentioned only as plain text. History itself is not evidence. NPCs, items
+and quests are rechecked
+by exact database ID and normalized name; spell identities use the current
+spell-name catalog shared with spell tools. Only identities are refreshed:
+historical locations, availability, stats and route claims are not revalidated
+by this step. Gameplay answers still require current factual lookup evidence.
+Missing IDs and mismatched names ask for clarification; a real identity does
+not prove the answer's claims about it. Checks share the request deadline,
+deduplicate repeated links,
+and use a configurable budget without another LLM call.
+
+Quest detail and chain tools accept `quest_id` for exact stage selection, or
+`quest_name` for title lookup. Active quest IDs come from the server request,
+are exposed by character context, and prioritize same-title stages before
+result limits. Multiple active stages with the same title ask for clarification.
+Chain output labels the selected active stage and reports partial-link limits;
+it does not claim that the last returned stage establishes the final reward.
+
+Conversation resolution is shared across subjects. With routing and memory
+enabled, follow-ups get one additional bounded model call that rewrites the
+question into a standalone request, preserving related goals, entity IDs and
+constraints while discarding unrelated goals on topic switches. Ambiguous
+references ask for clarification. Unsupported capabilities are explained
+instead of silently substituting a different search. Interpretation remains
+model-dependent; this does not implement new crafting or route-planning tools.
+
+Compact intent and pending clarification state use the existing per-character
+memory summary field. Entity references are reconstructed from answer links;
+they are not evidence of current facts. Oversized intent falls back to legacy
+Q&A history without storing truncated JSON. Memory pruning and memory-disabled
+behavior remain unchanged. No additional tables or files store player state.
+
+All provider adapters export portable copies of the same tool definitions;
+local validation retains root alternative-argument requirements. Export tests
+cover every catalog. Opt-in `test_provider_live.py` uses the configured provider
+with synthetic conversations and no database writes; set
+`GUIDE_TEST_PROVIDER_CONFIG` to a bridge config to run it. These tests make
+paid API requests and are skipped by default.
+
+Answers on every topic now target 60 words by default: a useful conclusion or
+next action, essential locations/links and brief uncertainty, not exhaustive
+lists. Explicit requests for detail can be longer. This is a soft generation
+target, not truncation: existing link-safe chat chunking remains available.
+Full comparison appendices are off by default. Readiness diagnostics remain in
+model context, while player-facing limitations are short. These choices reduce
+duplicate text and the frequency of multi-chunk replies.
+Ordinary recommendations omit internal lists of unevaluated effects (enchants,
+gems, procs and pet scaling), retaining useful tradeoffs and unknown sources.
+Excluded effects are discussed only when requested or materially relevant.
+Ordinary item recommendations use links, sources and qualitative reasons;
+numeric stat parentheses are omitted because tooltips show the stats. A final
+presentation pass removes known comparison boilerplate and stat parentheses
+without modifying entity links, coordinates or equip requirements. Explicit
+stat/comparison questions retain numeric detail. Old answers are cleaned for
+provider history replay without modifying stored memories.
+
 Key settings in `mod_llm_guide.conf`:
 
 | Setting | Default | Description |
@@ -312,6 +437,14 @@ Key settings in `mod_llm_guide.conf`:
 | `LLMGuide.Memory.Enable` | 1 | Remember conversations |
 | `LLMGuide.Memory.MaxPerCharacter` | 20 | Max stored memories |
 | `LLMGuide.Memory.ContextCount` | 5 | Recent memories in context |
+| `LLMGuide.Routing.Enable` | 1 | Shared question triage; 0 restores direct tool calling |
+| `LLMGuide.Conversation.Enable` | 1 | Resolve follow-ups before routing; shares request deadline and routing token budget |
+| `LLMGuide.Answer.TargetWords` | 60 | Soft answer-length target for all topics |
+| `LLMGuide.Answer.AppendComparisonDetails` | 0 | Opt into the full diagnostic comparison appendix |
+| `LLMGuide.Routing.MaxCalls` | 3 | Maximum independent initial lookups |
+| `LLMGuide.Routing.MaxTokens` | 600 | Classifier output token budget |
+| `LLMGuide.Readiness.Enable` | 1 | Check lookup completeness and retain limitations; restart bridge after changes |
+| `LLMGuide.Followup.MaxEntityChecks` | 8 | Maximum unresolved identities checked per answer; excess asks for clarification |
 
 ## Cost
 

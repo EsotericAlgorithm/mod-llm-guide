@@ -25,6 +25,51 @@
 #
 LLMGuide.Enable = 0
 
+# Overall queue lifetime, including waiting for the bridge (worldserver).
+LLMGuide.QueueTimeoutSeconds = 300
+
+# Per-attempt lease/deadline and per-provider-call timeout (bridge).
+# Temporary provider errors use bounded retries; abandoned leases are
+# retried up to MaxAttempts. QueueTimeoutSeconds remains the overall limit.
+LLMGuide.Bridge.RequestTimeoutSeconds = 120
+LLMGuide.Bridge.ApiTimeoutSeconds = 30
+LLMGuide.Bridge.ApiRetries = 2
+LLMGuide.Bridge.RetryDelaySeconds = 1
+LLMGuide.Bridge.MaxAttempts = 2
+LLMGuide.Bridge.MaxToolRounds = 5
+
+# Shared question routing before answering. Uses the configured provider/model.
+# Exact supported local questions bypass the routing call; other factual
+# questions use one bounded classification call. Invalid or ambiguous plans
+# ask for clarification rather than guessing. Restart the bridge after changes.
+LLMGuide.Routing.Enable = 1
+LLMGuide.Conversation.Enable = 1
+# Follow-ups use one extra intent-resolution call on the configured provider.
+# Shares routing token budget and request deadline. Requires routing enabled.
+LLMGuide.Routing.MaxCalls = 3
+LLMGuide.Routing.MaxTokens = 600
+
+# Check lookup completeness before answering. No additional review LLM call.
+# Unresolved gaps are preserved as limitations in the final answer.
+LLMGuide.Readiness.Enable = 1
+
+# Concise answers for every topic; soft target, not a hard truncation limit.
+LLMGuide.Answer.TargetWords = 60
+# Optional verbose diagnostic appendix; detailed answers can still be requested.
+LLMGuide.Answer.AppendComparisonDetails = 0
+
+# Maximum distinct unresolved entity links verified per answer. Exact IDs;
+# no extra model call. Exceeding the budget asks for clarification.
+LLMGuide.Followup.MaxEntityChecks = 8
+LLMGuide.Bridge.Workers = 2
+LLMGuide.Database.ConnectTimeoutSeconds = 10
+
+# Candidate search limits; item level alone does not establish an upgrade.
+LLMGuide.Items.ResultLimit = 10
+LLMGuide.Items.MaxItemLevelIncrease = 30
+# Optional JSON overrides of role candidate filters (not performance weights).
+LLMGuide.Items.RoleStats = {}
+
 #
 #   LLMGuide.EnableVerboseLogging
 #       Enable detailed logging for debugging (tool calls, context, timing, etc.)
