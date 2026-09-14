@@ -20,6 +20,17 @@ Ask a question, get an answer with clickable item/quest/spell links, all backed 
 
 ## Latest Updates
 
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### September 2026 - Easier Model and Provider Switching
+
+- Added model-aware request compatibility for Anthropic, OpenAI, Google
+  Gemini, OpenRouter, and local Ollama models.
+- Added reasoning-safe token budgets and bounded recovery when a provider
+  rejects an unsupported request parameter.
+- Expanded provider setup guidance so changing models normally requires only
+  selecting the provider and exact model ID.
+
 ### May 2026 - Google Gemini and OpenRouter Support
 
 - Added Google Gemini support through Google's OpenAI-compatible API,
@@ -92,8 +103,11 @@ Every item, quest, spell, and NPC name in responses becomes a proper in-game hyp
 Ask questions however you want. "Where can I buy cooking supplies?", "any blacksmith trainer near me?", "I need to find an inn", the guide understands what you're looking for even with typos or casual phrasing.
 
 ### Multi-Provider Support
-Works with Anthropic Claude, OpenAI GPT, Google Gemini, or OpenRouter.
-Haiku, GPT-4o-mini, GPT-4.1-mini, Gemini 3.1 Flash-Lite, and
+Works with Anthropic Claude, OpenAI GPT, Google Gemini, OpenRouter, or
+local Ollama models. OpenAI-compatible requests use automatic model
+capability profiles and learn safe parameter corrections when a new
+model explicitly rejects an option.
+Haiku, GPT-5.6 Luna, GPT-4o-mini, GPT-4.1-mini, Gemini 3.1 Flash-Lite, and
 OpenRouter-hosted Haiku 4.5 / GPT mini models are recommended for
 their speed and low cost.
 
@@ -147,7 +161,90 @@ planning what to do next.
 - An API key from [Anthropic](https://console.anthropic.com/),
   [OpenAI](https://platform.openai.com/),
   [Google AI Studio](https://aistudio.google.com/app/apikey), or
-  [OpenRouter](https://openrouter.ai/keys)
+  [OpenRouter](https://openrouter.ai/keys); or a reachable local Ollama server
+
+## Provider and Model Setup
+
+Configuration uses unquoted `Key = value` lines. Copy exact API model IDs,
+not provider display names. OpenRouter IDs use `vendor/model`; Ollama IDs use
+the name and optional tag shown by `ollama list`. Leave an optional value
+empty after `=`.
+
+Unlike chatter's universal model key, the guide has one model key per
+provider. This lets users keep several provider setups in the same file and
+switch by changing only `LLMGuide.Provider` after the keys and model choices
+have been entered once.
+
+| Provider | Provider value | Model setting | Credential |
+|----------|----------------|---------------|------------|
+| Anthropic | `anthropic` | `LLMGuide.Anthropic.Model` | `LLMGuide.Anthropic.ApiKey` |
+| OpenAI | `openai` | `LLMGuide.OpenAI.Model` | `LLMGuide.OpenAI.ApiKey` |
+| Google | `google` | `LLMGuide.Google.Model` | `LLMGuide.Google.ApiKey` |
+| OpenRouter | `openrouter` | `LLMGuide.OpenRouter.Model` | `LLMGuide.OpenRouter.ApiKey` |
+| Ollama | `ollama` | `LLMGuide.Ollama.Model` | None |
+
+Ready-to-copy examples (use only one provider value at a time):
+
+```ini
+# Anthropic
+LLMGuide.Provider = anthropic
+LLMGuide.Anthropic.Model = claude-haiku-4-5-20251001
+LLMGuide.Anthropic.ApiKey = sk-ant-xxxxx
+
+# OpenAI Luna
+LLMGuide.Provider = openai
+LLMGuide.OpenAI.Model = gpt-5.6-luna
+LLMGuide.OpenAI.ApiKey = sk-xxxxx
+LLMGuide.OpenAI.ReasoningEffort = none
+LLMGuide.OpenAI.MaxTokensMultiplier = 4
+
+# Google Gemini
+LLMGuide.Provider = google
+LLMGuide.Google.Model = gemini-3.1-flash-lite
+LLMGuide.Google.ApiKey = AIza-xxxxx
+
+# OpenRouter
+LLMGuide.Provider = openrouter
+LLMGuide.OpenRouter.Model = anthropic/claude-haiku-4.5
+LLMGuide.OpenRouter.ApiKey = sk-or-v1-xxxxx
+
+# Local Ollama from a Docker bridge
+LLMGuide.Provider = ollama
+LLMGuide.Ollama.Model = qwen3:8b
+LLMGuide.Ollama.BaseUrl = http://host.docker.internal:11434
+LLMGuide.Ollama.DisableThinking = 1
+```
+
+Restart `ac-llm-guide-bridge` after changing provider or model settings. The
+bridge automatically selects compatible token, temperature, and reasoning
+parameters, and remembers explicit unsupported-parameter corrections until
+the process restarts. Users normally do not need to retune parameters merely
+because they changed models.
+
+For OpenAI Luna, `none` is the fast setting and allows the configured
+temperature. Higher reasoning efforts can consume more of the output budget;
+the bridge applies `OpenAI.MaxTokensMultiplier` whenever hidden reasoning may
+be active and omits temperature when the selected model/effort does not
+support it. See the [official Luna model page](https://developers.openai.com/api/docs/models/gpt-5.6-luna).
+
+For Ollama, first run `ollama pull <model>` on the Ollama host. A host-run
+bridge normally uses `http://localhost:11434`; a Docker bridge normally uses
+`http://host.docker.internal:11434`. Do not append `/v1`. The model must
+reliably support OpenAI-style tool/function calling and structured arguments;
+plain-chat models cannot provide grounded guide answers.
+
+Ollama's OpenAI-compatible endpoint does not accept a per-request context
+size. Because the guide sends a large tool catalog, set
+`OLLAMA_CONTEXT_LENGTH` before starting Ollama, or create a custom model whose
+Modelfile contains `PARAMETER num_ctx 8192`. Confirm the loaded value in the
+`CONTEXT` column from `ollama ps`. Keep `Ollama.DisableThinking = 1` for
+Qwen3-style models unless you deliberately want reasoning tokens.
+
+Ollama accepts tool definitions through this endpoint but currently ignores
+`tool_choice`. If its routing pass returns text instead of a tool call, the
+guide skips that optional routing pass and lets the normal evidence/tool loop
+handle the question. On the last tool round, the guide removes the tool
+definitions entirely so the model must produce its final answer.
 
 ## Quick Start (Docker)
 
@@ -161,9 +258,14 @@ cp modules/mod-llm-guide/conf/mod_llm_guide.conf.dist \
 Edit `env/dist/etc/modules/mod_llm_guide.conf`:
 ```ini
 LLMGuide.Enable = 1
+LLMGuide.Provider = anthropic
+LLMGuide.Anthropic.Model = claude-haiku-4-5-20251001
 LLMGuide.Anthropic.ApiKey = sk-ant-your-key-here
 LLMGuide.Database.Host = ac-database
 ```
+
+Use another recipe from [Provider and Model Setup](#provider-and-model-setup)
+if you prefer OpenAI, Google, OpenRouter, or Ollama.
 
 ### 2. Add the bridge to docker-compose.override.yml
 
@@ -424,17 +526,32 @@ Key settings in `mod_llm_guide.conf`:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `LLMGuide.Enable` | 0 | Enable the module |
-| `LLMGuide.Provider` | anthropic | `anthropic`, `openai`, `google`, or `openrouter` |
+| `LLMGuide.Provider` | anthropic | `anthropic`, `openai`, `google`, `openrouter`, or `ollama` |
 | `LLMGuide.Anthropic.ApiKey` | -- | Your Anthropic API key |
+| `LLMGuide.Anthropic.Model` | claude-haiku-4-5-20251001 | Exact Anthropic model ID |
 | `LLMGuide.OpenAI.ApiKey` | -- | Your OpenAI API key |
+| `LLMGuide.OpenAI.Model` | gpt-4o-mini | Exact OpenAI API model ID, such as `gpt-5.6-luna` |
+| `LLMGuide.OpenAI.ReasoningEffort` | empty | Model default; use `none` for fast Luna requests |
+| `LLMGuide.OpenAI.MaxTokensMultiplier` | 4 | Output multiplier used only when hidden OpenAI reasoning may be active |
 | `LLMGuide.Google.ApiKey` | -- | Your Google Gemini API key |
+| `LLMGuide.Google.Model` | gemini-3.1-flash-lite | Exact Gemini API model ID |
+| `LLMGuide.Google.ReasoningEffort` | minimal | Used when `ThinkingBudget` is empty |
+| `LLMGuide.Google.ThinkingBudget` | empty | Whole token budget; `0` disables thinking on Gemini 2.5 Flash |
+| `LLMGuide.Google.MaxTokensMultiplier` | 1 | Output-budget multiplier |
 | `LLMGuide.OpenRouter.ApiKey` | -- | Your OpenRouter API key |
+| `LLMGuide.OpenRouter.Model` | anthropic/claude-haiku-4.5 | Exact `vendor/model` slug |
+| `LLMGuide.OpenRouter.BaseUrl` | https://openrouter.ai/api/v1 | OpenAI-compatible endpoint |
+| `LLMGuide.OpenRouter.HttpReferer` | empty | Optional complete attribution URL |
+| `LLMGuide.OpenRouter.Title` | empty | Optional plain-text app title |
+| `LLMGuide.Ollama.Model` | qwen3:8b | Local model; must support tool/function calling |
+| `LLMGuide.Ollama.BaseUrl` | http://host.docker.internal:11434 | Local Ollama server URL |
+| `LLMGuide.Ollama.DisableThinking` | 1 | Send `reasoning_effort = none` to compatible local models |
 | `LLMGuide.Database.Host` | localhost | Use `ac-database` for Docker |
 | `LLMGuide.Database.Name` | acore_characters | Characters database for requests and memories |
 | `LLMGuide.Database.WorldName` | acore_world | World database for game-data lookups; restart the bridge after changing |
 | `LLMGuide.CooldownSeconds` | 10 | Seconds between questions |
 | `LLMGuide.MaxTokens` | 300 | Max response tokens |
-| `LLMGuide.Temperature` | 0.7 | Creativity (0.0-1.0) |
+| `LLMGuide.Temperature` | 0.7 | Creativity (0.0-1.0); omitted automatically when unsupported |
 | `LLMGuide.DistanceUnit` | yards | `yards` or `meters` |
 | `LLMGuide.Memory.Enable` | 1 | Remember conversations |
 | `LLMGuide.Memory.MaxPerCharacter` | 20 | Max stored memories |
@@ -450,18 +567,18 @@ Key settings in `mod_llm_guide.conf`:
 
 ## Cost
 
-| Provider | Model | Per 1000 questions |
-|----------|-------|-------------------|
-| Anthropic | Claude Haiku | ~$0.10-0.15 |
-| OpenAI | GPT-4o-mini | ~$0.15-0.20 |
-| OpenAI | GPT-4.1-mini | varies by tool use and response length |
-| Google | Gemini 3.1 Flash-Lite | varies by tool use and response length |
-| OpenRouter | Claude Haiku 4.5, GPT-4o-mini, or GPT-4.1-mini | varies by routed provider and response length |
+Cost depends on the selected model, prompt/tool traffic, answer length, and
+current provider prices. Check the live pricing page for
+[Anthropic](https://www.anthropic.com/pricing),
+[OpenAI](https://developers.openai.com/api/docs/pricing),
+[Google Gemini](https://ai.google.dev/gemini-api/docs/pricing), or the chosen
+[OpenRouter model](https://openrouter.ai/models). Local Ollama has no API
+token charge but uses your own hardware and electricity.
 
 Tool/function calling is required. The guide asks the model to call
 database tools for quests, NPCs, items, spells, trainers, vendors, and
 other factual lookups. Use a model that reliably supports function
-calling on your chosen provider. Haiku, GPT-4o-mini, GPT-4.1-mini,
+calling on your chosen provider. Haiku, GPT-5.6 Luna, GPT-4o-mini, GPT-4.1-mini,
 Gemini 3.1 Flash-Lite, and OpenRouter-hosted Claude Haiku 4.5 / GPT
 mini models are the recommended choices.
 

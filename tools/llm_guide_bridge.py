@@ -8,6 +8,7 @@ Supports:
 - OpenAI GPT (gpt-4o-mini, gpt-4o, etc.) - with tool calling
 - Google Gemini (Gemini 3 Flash, 2.5 Flash, etc.) - with tool calling
 - OpenRouter models - with OpenAI-compatible tool calling
+- Local Ollama models - with OpenAI-compatible tool calling
 
 Setup:
 1. pip install -r requirements.txt
@@ -30,7 +31,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from game_tools import GAME_TOOLS, GameToolExecutor
 from guide_reliability import ANSWER_RULES, decode_snapshot, requires_evidence
 from guide_routing import (
-    CLARIFY_TOOL, CLARIFY_FALLBACK, ROUTING_PROMPT, exact_plan, validate_plan,
+    CLARIFY_TOOL, CLARIFY_FALLBACK, ROUTING_PROMPT, exact_plan,
+    is_empty_tool_plan, validate_plan,
 )
 from guide_followup import reverify_followup
 from guide_presentation import compact_equipment_answer
@@ -39,6 +41,12 @@ from guide_conversation import (
     CONTEXT_TOOL, CONTEXT_PROMPT, conversation_view, parse_context,
     encode_context, decode_context,
 )
+from llm_compat import (
+    build_chat_options,
+    create_chat_completion,
+    describe_model_compatibility,
+    needs_reasoning_token_multiplier,
+)
 
 
 GOOGLE_OPENAI_BASE_URL = (
@@ -46,6 +54,7 @@ GOOGLE_OPENAI_BASE_URL = (
 )
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "anthropic/claude-haiku-4.5"
+DEFAULT_OLLAMA_MODEL = "qwen3:8b"
 
 
 def resolve_model_alias(model_name: str) -> str:
@@ -303,6 +312,15 @@ class LLMBridge:
         self.anthropic_model = get_config_value(config, "LLMGuide.Anthropic.Model", "claude-haiku-4-5-20251001")
         self.openai_key = get_config_value(config, "LLMGuide.OpenAI.ApiKey", "")
         self.openai_model = get_config_value(config, "LLMGuide.OpenAI.Model", "gpt-4o-mini")
+        self.openai_reasoning_effort = get_config_value(
+            config, "LLMGuide.OpenAI.ReasoningEffort", ""
+        ).strip().lower()
+        self.openai_max_tokens_multiplier = max(1.0, min(
+            get_config_float(
+                config, "LLMGuide.OpenAI.MaxTokensMultiplier", 4
+            ),
+            8.0,
+        ))
         self.google_key = get_config_value(config, "LLMGuide.Google.ApiKey", "")
         self.google_model = resolve_model_alias(get_config_value(
             config, "LLMGuide.Google.Model", "gemini-3.1-flash-lite"
@@ -333,7 +351,18 @@ class LLMBridge:
             OPENROUTER_BASE_URL,
         )
         self.openrouter_headers = openrouter_headers(config)
-        self.max_tokens = get_config_int(config, "LLMGuide.MaxTokens", 500)
+        self.ollama_model = get_config_value(
+            config, "LLMGuide.Ollama.Model", DEFAULT_OLLAMA_MODEL
+        )
+        self.ollama_base_url = get_config_value(
+            config,
+            "LLMGuide.Ollama.BaseUrl",
+            "http://host.docker.internal:11434",
+        ).rstrip("/")
+        self.ollama_disable_thinking = get_config_int(
+            config, "LLMGuide.Ollama.DisableThinking", 1
+        ) == 1
+        self.max_tokens = get_config_int(config, "LLMGuide.MaxTokens", 300)
         self.temperature = get_config_float(config, "LLMGuide.Temperature", 0.7)
         self.system_prompt = get_config_value(config, "LLMGuide.SystemPrompt",
             "You are a helpful WoW guide. Be concise.")
@@ -1006,6 +1035,12 @@ class LLMBridge:
         self.api_clients.append(client)
         model = model or self.openai_model
 
+        def invoke_chat_completion(**request_kwargs):
+            return self.provider_call(
+                client.chat.completions.create,
+                **request_kwargs,
+            )
+
         # Build messages with conversation history as real turns
         messages = [
             {"role": "system",
@@ -1046,28 +1081,52 @@ class LLMBridge:
                 'content': (system_prompt or self.system_prompt) + (
                     '' if routing else self.tool_executor.readiness_prompt()),
             }
+            tool_catalog = (
+                CONTEXT_TOOLS_OPENAI if routing == 'context'
+                else ROUTING_TOOLS_OPENAI if routing
+                else GAME_TOOLS_OPENAI
+            )
             request_kwargs = {
                 "model": model,
                 "messages": messages,
-                "tools": CONTEXT_TOOLS_OPENAI if routing == 'context' else
-                    ROUTING_TOOLS_OPENAI if routing else GAME_TOOLS_OPENAI,
-                "temperature": 0 if routing else self.temperature,
             }
-            if compatible_provider in ("google", "openrouter"):
+            ollama_final_round = (
+                compatible_provider == "ollama"
+                and not routing
+                and round_num == max_tool_rounds
+            )
+            if not ollama_final_round:
+                request_kwargs["tools"] = tool_catalog
+            multiplier = 1.0
+            if compatible_provider == "google":
                 multiplier = max(
                     1.0,
-                    min(
-                        self.google_max_tokens_multiplier
-                        if compatible_provider == "google"
-                        else 1.0,
-                        8.0,
-                    ),
+                    min(self.google_max_tokens_multiplier, 8.0),
                 )
-                request_kwargs["max_tokens"] = int(
+            elif (
+                compatible_provider == "openai"
+                and needs_reasoning_token_multiplier(
+                    compatible_provider,
+                    model,
+                    self.openai_reasoning_effort,
+                )
+            ):
+                multiplier = self.openai_max_tokens_multiplier
+            request_kwargs.update(build_chat_options(
+                compatible_provider,
+                model,
+                int(
                     (self.routing_max_tokens if routing else self.max_tokens)
                     * multiplier
-                )
-                if compatible_provider == "google" and google_thinking_config:
+                ),
+                temperature=0 if routing else self.temperature,
+                reasoning_effort=(
+                    self.openai_reasoning_effort
+                    if compatible_provider == "openai" else None
+                ),
+            ))
+            if compatible_provider == "google":
+                if google_thinking_config:
                     request_kwargs["extra_body"] = {
                         "extra_body": {
                             "google": {
@@ -1078,8 +1137,6 @@ class LLMBridge:
                         },
                     }
                 elif (
-                    compatible_provider == "google"
-                    and
                     self.google_reasoning_effort
                     and self.google_reasoning_effort
                     not in ("0", "none", "off", "disabled")
@@ -1087,16 +1144,28 @@ class LLMBridge:
                     request_kwargs["reasoning_effort"] = (
                         self.google_reasoning_effort
                     )
-            else:
-                request_kwargs["max_completion_tokens"] = (
-                    self.routing_max_tokens if routing else self.max_tokens)
-            response = self.provider_call(client.chat.completions.create,
-                **dict(request_kwargs,
-                       tool_choice=("required" if routing or (round_num == 0 and
-                                    requires_evidence(question) and not
-                                    self.tool_executor.evidence.results) else
-                                    "none" if round_num == max_tool_rounds
-                                    else "auto"))
+            elif compatible_provider == "ollama":
+                if self.ollama_disable_thinking:
+                    request_kwargs["reasoning_effort"] = "none"
+            if compatible_provider != "ollama":
+                request_kwargs["tool_choice"] = (
+                    "required" if routing or (
+                        round_num == 0
+                        and requires_evidence(question)
+                        and not self.tool_executor.evidence.results
+                    ) else "none" if round_num == max_tool_rounds
+                    else "auto"
+                )
+            response = create_chat_completion(
+                invoke_chat_completion,
+                request_kwargs,
+                compatible_provider,
+                model,
+                logger,
+                reasoning_token_multiplier=(
+                    self.openai_max_tokens_multiplier
+                    if compatible_provider == "openai" else 1
+                ),
             )
 
             usage = getattr(response, "usage", None)
@@ -1184,6 +1253,25 @@ class LLMBridge:
             routing=routing,
         )
 
+    def call_ollama(
+        self, question: str, system_prompt: str = None,
+        memories_recent: list = None, routing: bool = False,
+    ) -> tuple:
+        """Call a local Ollama model through its OpenAI endpoint."""
+        base_url = self.ollama_base_url
+        if not base_url.endswith("/v1"):
+            base_url += "/v1"
+        return self.call_openai(
+            question,
+            system_prompt,
+            memories_recent,
+            api_key="ollama",
+            model=self.ollama_model,
+            base_url=base_url,
+            compatible_provider="ollama",
+            routing=routing,
+        )
+
     def call_llm(
         self, question: str, system_prompt: str = None,
         memories_recent: list = None, routing: bool = False,
@@ -1205,6 +1293,10 @@ class LLMBridge:
             return self.call_openrouter(
                 question, system_prompt, memories_recent, routing=routing
             )
+        elif self.provider == "ollama":
+            return self.call_ollama(
+                question, system_prompt, memories_recent, routing=routing
+            )
         else:
             raise ValueError(
                 f"Unknown LLM provider: {self.provider}"
@@ -1224,10 +1316,23 @@ class LLMBridge:
                     '\nCurrent player data:\n' + char_context,
                     routing='context')
                 tokens += used
-                self.conversation_context = parse_context(raw)
-                if self.conversation_context['status'] != 'ready':
-                    return '', self.conversation_context['question'], tokens
-                question = self.conversation_context['request']
+                if (
+                    self.provider == "ollama"
+                    and is_empty_tool_plan(raw)
+                ):
+                    logger.info(
+                        "Ollama returned no context-routing tool call; "
+                        "continuing with deterministic routing"
+                    )
+                else:
+                    self.conversation_context = parse_context(raw)
+                    if self.conversation_context['status'] != 'ready':
+                        return (
+                            '',
+                            self.conversation_context['question'],
+                            tokens,
+                        )
+                    question = self.conversation_context['request']
             plan = exact_plan(question, self.tool_executor.default_zone)
             if plan is None:
                 prompt = (ROUTING_PROMPT +
@@ -1236,6 +1341,15 @@ class LLMBridge:
                 plan, used, _ = self.call_llm(
                     question, prompt, memories_recent=recent, routing=True)
                 tokens += used
+                if (
+                    self.provider == "ollama"
+                    and is_empty_tool_plan(plan)
+                ):
+                    logger.info(
+                        "Ollama returned no routing tool call; "
+                        "continuing with the normal tool loop"
+                    )
+                    return '', None, tokens
             plan = validate_plan(plan, GAME_TOOLS, self.routing_max_calls)
         except ValueError as error:
             logger.warning('Question routing needs clarification: %s', error)
@@ -1409,19 +1523,38 @@ class LLMBridge:
         """Validate the configuration."""
         if self.provider == "anthropic":
             if not self.anthropic_key:
-                logger.error("Anthropic API key not configured (LLMGuide.Anthropic.ApiKey)")
+                logger.error(
+                    "Anthropic API key not configured "
+                    "(LLMGuide.Anthropic.ApiKey)"
+                )
                 return False
         elif self.provider == "openai":
             if not self.openai_key:
-                logger.error("OpenAI API key not configured (LLMGuide.OpenAI.ApiKey)")
+                logger.error(
+                    "OpenAI API key not configured "
+                    "(LLMGuide.OpenAI.ApiKey)"
+                )
                 return False
         elif self.provider == "google":
             if not self.google_key:
-                logger.error("Google API key not configured (LLMGuide.Google.ApiKey)")
+                logger.error(
+                    "Google API key not configured "
+                    "(LLMGuide.Google.ApiKey)"
+                )
                 return False
         elif self.provider == "openrouter":
             if not self.openrouter_key:
-                logger.error("OpenRouter API key not configured (LLMGuide.OpenRouter.ApiKey)")
+                logger.error(
+                    "OpenRouter API key not configured "
+                    "(LLMGuide.OpenRouter.ApiKey)"
+                )
+                return False
+        elif self.provider == "ollama":
+            if not self.ollama_model:
+                logger.error(
+                    "Ollama model not configured "
+                    "(LLMGuide.Ollama.Model)"
+                )
                 return False
         else:
             logger.error(f"Unknown LLM provider: {self.provider}")
@@ -1439,6 +1572,8 @@ class LLMBridge:
             return self.google_model
         if self.provider == "openrouter":
             return self.openrouter_model
+        if self.provider == "ollama":
+            return self.ollama_model
         return "(unknown)"
 
     def run_request(self, request):
@@ -1468,6 +1603,24 @@ class LLMBridge:
         logger.info("LLM Bridge for mod-llm-guide starting...")
         logger.info(f"Provider: {self.provider}")
         logger.info(f"Model: {self.active_model()}")
+        if self.provider in (
+            "openai", "google", "openrouter", "ollama"
+        ):
+            logger.info(
+                "Model compatibility: %s",
+                describe_model_compatibility(
+                    self.provider,
+                    self.active_model(),
+                    self.openai_reasoning_effort
+                    if self.provider == "openai" else None,
+                ),
+            )
+        if self.provider == "ollama":
+            logger.info(
+                "Ollama thinking mode: %s",
+                "disabled" if self.ollama_disable_thinking
+                else "enabled",
+            )
         logger.info(f"Tools: {len(GAME_TOOLS)} game data tools available")
         logger.info(f"Distance unit: {self.distance_unit}")
         logger.info(f"Poll interval: {self.poll_interval}s")

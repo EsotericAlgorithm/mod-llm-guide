@@ -1,7 +1,8 @@
 """Opt-in real-provider contracts; synthetic history, no database writes.
 
-Set GUIDE_TEST_PROVIDER_CONFIG to an existing bridge config. Uses paid API
-requests on that provider. Never runs by default or prints credentials.
+Set GUIDE_TEST_PROVIDER_CONFIG to an existing bridge config. Uses real API
+requests which may incur cloud charges. Never runs by default or prints
+credentials.
 """
 import json
 import os

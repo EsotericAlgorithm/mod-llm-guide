@@ -61,6 +61,14 @@ def exact_plan(question, zone):
     return None
 
 
+def is_empty_tool_plan(raw):
+    """Return whether a routing response contains no tool calls."""
+    try:
+        return json.loads(raw) == [] if isinstance(raw, str) else raw == []
+    except (TypeError, ValueError):
+        return False
+
+
 def validate_plan(raw, tools, max_calls):
     """Validate the whole plan before any lookup can execute."""
     calls = json.loads(raw) if isinstance(raw, str) else raw
