@@ -748,6 +748,11 @@ class GameToolExecutor(
         self.soap_config = None
         self.admin_db_names = {}
         self.web_search_config = None
+        # Real USD cost of any OpenRouter calls made *inside* a tool
+        # (currently just web_search's own sub-call) — the bridge adds
+        # this to its own last_call_cost when logging a request's total.
+        # Reset to 0.0 by the bridge at the start of each request.
+        self.extra_cost_usd = 0.0
 
     def begin_request(self, snapshot, summary=''):
         self.snapshot = snapshot

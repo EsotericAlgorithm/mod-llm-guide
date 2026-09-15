@@ -441,6 +441,12 @@ class LLMBridge:
                 'model': self.openrouter_model,
                 'base_url': self.openrouter_base_url,
             }
+
+        # Real USD cost of the current request's OpenRouter call(s),
+        # accumulated across every call_openai invocation (routing pass
+        # + main tool-loop rounds) — see call_openai's usage.include
+        # extra_body. None on other providers, which don't return this.
+        self.last_call_cost = None
         self.request_timeout = max(10, get_config_int(
             config, "LLMGuide.Bridge.RequestTimeoutSeconds", 120))
         self.api_timeout = max(1, get_config_int(
@@ -609,9 +615,16 @@ class LLMBridge:
             add_column_if_missing(
                 cursor,
                 "llm_guide_queue",
+                "actual_cost_usd",
+                "DECIMAL(10,6) DEFAULT NULL",
+                after_column="tokens_used",
+            )
+            add_column_if_missing(
+                cursor,
+                "llm_guide_queue",
                 "position_x",
                 "FLOAT DEFAULT NULL",
-                after_column="tokens_used",
+                after_column="actual_cost_usd",
             )
             add_column_if_missing(
                 cursor,
@@ -863,18 +876,34 @@ class LLMBridge:
         """, (self.lease_token, self.request_timeout, request_id))
         return cursor.rowcount == 1
 
-    def save_response(self, cursor, request_id, response, tokens_used=0):
+    def save_response(
+        self, cursor, request_id, response, tokens_used=0,
+        actual_cost_usd=None,
+    ):
         """Save the LLM response."""
         cursor.execute("""
             UPDATE llm_guide_queue
             SET status = 'complete',
                 response = %s,
                 tokens_used = %s,
+                actual_cost_usd = %s,
                 processed_at = NOW()
             WHERE id = %s AND status = 'processing' AND lease_token = %s
               AND lease_until >= NOW()
-        """, (response, tokens_used, request_id, self.lease_token))
+        """, (response, tokens_used, actual_cost_usd, request_id,
+              self.lease_token))
         return cursor.rowcount == 1
+
+    def total_request_cost(self):
+        """Real USD cost of every OpenRouter call made so far for the
+        current request (main model calls + any tool's own sub-calls,
+        e.g. web_search) — None when not on the openrouter provider,
+        since only it returns real cost data."""
+        if self.provider != "openrouter":
+            return None
+        return (self.last_call_cost or 0.0) + (
+            self.tool_executor.extra_cost_usd or 0.0
+        )
 
     def save_error(self, cursor, request_id, error_message):
         """Save an error for a request."""
@@ -1206,6 +1235,12 @@ class LLMBridge:
             elif compatible_provider == "ollama":
                 if self.ollama_disable_thinking:
                     request_kwargs["reasoning_effort"] = "none"
+            if compatible_provider == "openrouter":
+                # OpenRouter-specific extension: makes the response's
+                # usage object carry a real `cost` field (actual USD for
+                # this exact generation, not an estimate) — see
+                # last_call_cost below.
+                request_kwargs["extra_body"] = {"usage": {"include": True}}
             if compatible_provider != "ollama":
                 request_kwargs["tool_choice"] = (
                     "required" if routing or (
@@ -1231,6 +1266,12 @@ class LLMBridge:
             total_tokens += int(
                 getattr(usage, "total_tokens", 0) or 0
             )
+            if compatible_provider == "openrouter":
+                cost = getattr(usage, "cost", None)
+                if cost is not None:
+                    self.last_call_cost = (
+                        (self.last_call_cost or 0.0) + float(cost)
+                    )
             message = response.choices[0].message
             if getattr(response.choices[0], 'finish_reason', None) in {
                     'length', 'content_filter'}:
@@ -1450,6 +1491,8 @@ class LLMBridge:
             return
         self.deadline = time.monotonic() + self.request_timeout
         self.conversation_context = None
+        self.last_call_cost = None
+        self.tool_executor.extra_cost_usd = 0.0
 
         if is_admin:
             self.process_admin_request(
@@ -1562,7 +1605,10 @@ class LLMBridge:
                 detailed=bool(re.search(
                     r'\b(stats?|numbers?|numeric|detailed|compare|comparison|'
                     r'enchants?|gems?|procs?|scaling)\b', question, re.IGNORECASE)))
-            if not self.save_response(cursor, request_id, response, tokens):
+            cost = self.total_request_cost()
+            if not self.save_response(
+                    cursor, request_id, response, tokens,
+                    actual_cost_usd=cost):
                 return
 
             # Store memory with full Q&A for future message replay
@@ -1575,7 +1621,10 @@ class LLMBridge:
                 question=question, response=response
             )
 
-            logger.info(f"Request {request_id} completed ({tokens} tokens)")
+            cost_str = f", ${cost:.6f}" if cost is not None else ""
+            logger.info(
+                f"Request {request_id} completed ({tokens} tokens{cost_str})"
+            )
         except Exception as e:
             logger.error(f"Request {request_id} failed: {e}")
             self.save_error(cursor, request_id, str(e))
@@ -1648,15 +1697,20 @@ class LLMBridge:
             self.api_clients.clear()
 
         response = response.strip() or "(no response text)"
-        if not self.save_response(cursor, request_id, response, tokens):
+        cost = self.total_request_cost()
+        if not self.save_response(
+                cursor, request_id, response, tokens,
+                actual_cost_usd=cost):
             return
         self.store_memory(
             cursor, char_guid, char_name,
             self.generate_summary(question, response),
             question=question, response=response,
         )
+        cost_str = f", ${cost:.6f}" if cost is not None else ""
         logger.info(
-            f"Admin request {request_id} completed ({tokens} tokens)"
+            f"Admin request {request_id} completed "
+            f"({tokens} tokens{cost_str})"
         )
 
     def validate_config(self) -> bool:

@@ -225,6 +225,10 @@ class AdminToolMixin:
                 ),
             }],
             'plugins': [{'id': 'web', 'max_results': 5}],
+            # Real USD cost for this exact call, not an estimate —
+            # accumulated into self.extra_cost_usd so the bridge's
+            # per-request cost log includes it.
+            'usage': {'include': True},
         }).encode('utf-8')
 
         req = urllib.request.Request(
@@ -246,6 +250,10 @@ class AdminToolMixin:
         except Exception as exc:
             logger.error("ADMIN WEB SEARCH failed: %s", exc)
             return f"Web search error: {exc}"
+
+        cost = (payload.get('usage') or {}).get('cost')
+        if cost is not None:
+            self.extra_cost_usd = (self.extra_cost_usd or 0.0) + float(cost)
 
         try:
             message = payload['choices'][0]['message']

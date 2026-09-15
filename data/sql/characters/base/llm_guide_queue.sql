@@ -16,6 +16,7 @@ CREATE TABLE `llm_guide_queue` (
   `status` ENUM('pending', 'processing', 'complete', 'delivered', 'cancelled', 'error') NOT NULL DEFAULT 'pending',
   `error_message` VARCHAR(255) DEFAULT NULL,
   `tokens_used` INT UNSIGNED DEFAULT 0,
+  `actual_cost_usd` DECIMAL(10,6) DEFAULT NULL COMMENT 'Real USD cost from the provider (openrouter only; NULL otherwise)',
   `position_x` FLOAT DEFAULT NULL COMMENT 'Player X coordinate when question was asked',
   `position_y` FLOAT DEFAULT NULL COMMENT 'Player Y coordinate when question was asked',
   `map_id` INT UNSIGNED DEFAULT NULL COMMENT 'Map ID when question was asked',
