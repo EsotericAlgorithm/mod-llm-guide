@@ -13,7 +13,10 @@ for an after-the-fact audit trail, since nothing here asks for
 confirmation before acting.
 """
 
+import json
 import logging
+import urllib.error
+import urllib.request
 
 from guide_soap import SoapError, call_soap_command
 
@@ -70,6 +73,29 @@ ADMIN_TOOLS = [
                 },
             },
             "required": ["command"],
+        },
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "Search the live web for information not in this server's "
+            "database — community knowledge, best-in-slot/theorycrafting "
+            "opinions, patch notes, wiki pages, anything requiring "
+            "outside sources (e.g. 'best weapon from Deadmines for a "
+            "level 20 warrior'). Costs a small per-search fee, so only "
+            "call this when the local game-data tools genuinely can't "
+            "answer the question. Returns a short synthesized answer "
+            "plus source URLs, not raw search results."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query.",
+                },
+            },
+            "required": ["query"],
         },
     },
 ]
@@ -164,3 +190,76 @@ class AdminToolMixin:
         except Exception as exc:
             logger.error("ADMIN SOAP failed: %s", exc)
             return f"SOAP transport error: {exc}"
+
+    def _execute_web_search(self, params: dict) -> str:
+        query = (params.get('query') or '').strip()
+        if not query:
+            return "Empty query."
+
+        config = getattr(self, 'web_search_config', None) or {}
+        api_key = config.get('api_key')
+        model = config.get('model')
+        base_url = config.get('base_url') or 'https://openrouter.ai/api/v1'
+        if not (api_key and model):
+            return (
+                "Web search is not configured on this bridge "
+                "(reuses LLMGuide.OpenRouter.ApiKey/Model; provider "
+                "must be openrouter)."
+            )
+
+        logger.warning("ADMIN WEB SEARCH: %s", query)
+
+        # A separate, self-contained OpenRouter call using its Exa-backed
+        # `web` plugin — deliberately not woven into the main tool-calling
+        # loop (that plugin is a per-request feature that always searches,
+        # not something the model can choose per-round). Wrapping it as a
+        # tool call instead means a search only happens when the model
+        # actually decides this question needs one.
+        body = json.dumps({
+            'model': model,
+            'messages': [{
+                'role': 'user',
+                'content': (
+                    'Answer concisely using web search results, WoW '
+                    f'3.3.5a (Wrath of the Lich King) context: {query}'
+                ),
+            }],
+            'plugins': [{'id': 'web', 'max_results': 5}],
+        }).encode('utf-8')
+
+        req = urllib.request.Request(
+            base_url.rstrip('/') + '/chat/completions',
+            data=body,
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}',
+            },
+            method='POST',
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                payload = json.loads(resp.read().decode('utf-8'))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode('utf-8', 'replace')
+            logger.error("ADMIN WEB SEARCH HTTP error: %s", detail)
+            return f"Web search HTTP error: {exc.code} {detail[:300]}"
+        except Exception as exc:
+            logger.error("ADMIN WEB SEARCH failed: %s", exc)
+            return f"Web search error: {exc}"
+
+        try:
+            message = payload['choices'][0]['message']
+            text = (message.get('content') or '').strip()
+            urls = [
+                ann['url_citation']['url']
+                for ann in (message.get('annotations') or [])
+                if ann.get('type') == 'url_citation'
+                and ann.get('url_citation', {}).get('url')
+            ]
+        except (KeyError, IndexError, TypeError) as exc:
+            logger.error("ADMIN WEB SEARCH unexpected payload: %s", exc)
+            return f"Web search returned an unexpected response: {payload}"
+
+        if urls:
+            text += "\nSources: " + ", ".join(dict.fromkeys(urls))
+        return text or "Web search returned no answer."

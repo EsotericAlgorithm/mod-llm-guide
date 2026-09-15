@@ -430,6 +430,17 @@ class LLMBridge:
         }
         self.admin_system_prompt = get_config_value(
             config, "LLMGuide.Admin.SystemPrompt", "").replace("\\n", "\n")
+
+        # GM Admin Mode's web_search tool reuses the OpenRouter key/model
+        # already configured above — only meaningful when
+        # LLMGuide.Provider = openrouter (see admin_tools._execute_web_search,
+        # which reports itself unconfigured otherwise rather than failing).
+        if self.provider == "openrouter":
+            self.tool_executor.web_search_config = {
+                'api_key': self.openrouter_key,
+                'model': self.openrouter_model,
+                'base_url': self.openrouter_base_url,
+            }
         self.request_timeout = max(10, get_config_int(
             config, "LLMGuide.Bridge.RequestTimeoutSeconds", 120))
         self.api_timeout = max(1, get_config_int(

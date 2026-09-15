@@ -747,6 +747,7 @@ class GameToolExecutor(
         self.admin_tools = []
         self.soap_config = None
         self.admin_db_names = {}
+        self.web_search_config = None
 
     def begin_request(self, snapshot, summary=''):
         self.snapshot = snapshot
@@ -1192,6 +1193,8 @@ class GameToolExecutor(
                 return self._execute_sql(tool_input)
             elif tool_name == "execute_soap_command":
                 return self._execute_soap_command(tool_input)
+            elif tool_name == "web_search":
+                return self._execute_web_search(tool_input)
             else:
                 return f"Unknown tool: {tool_name}"
         except Exception as e:
