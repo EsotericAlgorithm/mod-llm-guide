@@ -505,6 +505,18 @@ LLMGuide.Soap.Username =
 LLMGuide.Soap.Password =
 
 #
+#   LLMGuide.Admin.MaxTokens
+#       Response token budget for .agm only. Deliberately separate from
+#       LLMGuide.MaxTokens (below, default 300 — sized for .ag's terse
+#       ~60-word answers): admin responses cover multi-step actions
+#       (several SQL/SOAP calls plus a closing summary) and hit 300
+#       mid-answer in practice, which surfaces as a "did not return a
+#       complete answer" error even though the actions already succeeded.
+#       Default: 4000
+#
+LLMGuide.Admin.MaxTokens = 4000
+
+#
 #   LLMGuide.Admin.SystemPrompt
 #       Overrides the built-in GM Admin Mode system prompt. Leave empty to
 #       use the default (explains full SQL/SOAP authority, no confirmation

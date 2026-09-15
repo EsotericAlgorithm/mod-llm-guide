@@ -375,6 +375,18 @@ class LLMBridge:
             config, "LLMGuide.Ollama.DisableThinking", 1
         ) == 1
         self.max_tokens = get_config_int(config, "LLMGuide.MaxTokens", 300)
+        # GM Admin Mode gets its own, larger budget — its responses cover
+        # multi-step actions (several SQL/SOAP calls plus a closing
+        # summary), not .ag's terse ~60-word answers. Sharing MaxTokens=300
+        # caused real failures live (2026-09-15): the model hit the token
+        # cap mid-final-answer after successfully executing several
+        # actions, finish_reason='length', raised as "did not return a
+        # complete answer" — the actions had already happened, just the
+        # confirmation text got cut off. active_max_tokens (below) is what
+        # every call actually reads; process_admin_request swaps it.
+        self.admin_max_tokens = get_config_int(
+            config, "LLMGuide.Admin.MaxTokens", 4000)
+        self.active_max_tokens = self.max_tokens
         self.temperature = get_config_float(config, "LLMGuide.Temperature", 0.7)
         self.system_prompt = get_config_value(config, "LLMGuide.SystemPrompt",
             "You are a helpful WoW guide. Be concise.")
@@ -1021,7 +1033,7 @@ class LLMBridge:
             # Make API call with tools
             response = self.provider_call(client.messages.create,
                 model=self.anthropic_model,
-                max_tokens=self.routing_max_tokens if routing else self.max_tokens,
+                max_tokens=self.routing_max_tokens if routing else self.active_max_tokens,
                 system=(system_prompt or self.system_prompt) + (
                     '' if routing else self.tool_executor.readiness_prompt()),
                 messages=messages,
@@ -1210,7 +1222,8 @@ class LLMBridge:
                 compatible_provider,
                 model,
                 int(
-                    (self.routing_max_tokens if routing else self.max_tokens)
+                    (self.routing_max_tokens if routing
+                     else self.active_max_tokens)
                     * multiplier
                 ),
                 temperature=0 if routing else self.temperature,
@@ -1679,6 +1692,7 @@ class LLMBridge:
         self.tool_executor.admin_tools = ADMIN_TOOLS
         self.active_tools_provider = ADMIN_GAME_TOOLS_PROVIDER
         self.active_tools_openai = ADMIN_GAME_TOOLS_OPENAI
+        self.active_max_tokens = self.admin_max_tokens
         try:
             system_prompt = self.admin_system_prompt or (
                 "You are the Azeroth Guide operating in GM ADMIN MODE "
@@ -1709,6 +1723,7 @@ class LLMBridge:
             self.tool_executor.admin_tools = []
             self.active_tools_provider = GAME_TOOLS_PROVIDER
             self.active_tools_openai = GAME_TOOLS_OPENAI
+            self.active_max_tokens = self.max_tokens
             for client in self.api_clients:
                 client.close()
             self.api_clients.clear()
