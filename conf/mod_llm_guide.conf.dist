@@ -445,6 +445,75 @@ LLMGuide.Database.Name = acore_characters
 LLMGuide.Database.WorldName = acore_world
 
 #
+#   LLMGuide.Database.AuthName
+#       Auth database name. Only used by GM Admin Mode's execute_sql tool
+#       (database="auth") — the normal player-facing guide never touches it.
+#       Default: acore_auth
+#
+LLMGuide.Database.AuthName = acore_auth
+
+#
+#   LLMGuide.Database.PlayerbotsName
+#       mod-playerbots database name. Only used by GM Admin Mode's
+#       execute_sql tool (database="playerbots").
+#       Default: acore_playerbots
+#
+LLMGuide.Database.PlayerbotsName = acore_playerbots
+
+###############################################################################
+# GM ADMIN MODE (.agm, SEC_ADMINISTRATOR only)
+###############################################################################
+# .agm hands the model open-ended raw SQL (execute_sql, against world/
+# characters/auth/playerbots) and SOAP console access (execute_soap_command,
+# any command a human admin could run) with no allowlist. There is no
+# confirmation step — every call runs immediately and for real. Only
+# characters at SEC_ADMINISTRATOR can invoke it (checked in LLMGuideScript.cpp,
+# not just here). Leave LLMGuide.Soap.Username/Password empty to disable the
+# SOAP half while still allowing execute_sql.
+
+#
+#   LLMGuide.Soap.Host
+#       Worldserver SOAP endpoint hostname. Usually the same host running
+#       worldserver; SOAP.IP/SOAP.Port in worldserver.conf control the
+#       listening side.
+#       Default: localhost
+#
+LLMGuide.Soap.Host = localhost
+
+#
+#   LLMGuide.Soap.Port
+#       Worldserver SOAP endpoint port (matches SOAP.Port in worldserver.conf).
+#       Default: 7878
+#
+LLMGuide.Soap.Port = 7878
+
+#
+#   LLMGuide.Soap.Username
+#       Game account name used to authenticate SOAP calls. Must be an
+#       account with GM/administrator security level in-game — SOAP enforces
+#       that account's own permissions on top of whatever LLMGuideScript.cpp
+#       checks before queuing the request.
+#       Default: (empty — SOAP calls fail closed until set)
+#
+LLMGuide.Soap.Username =
+
+#
+#   LLMGuide.Soap.Password
+#       Password for the account above.
+#       Default: (empty)
+#
+LLMGuide.Soap.Password =
+
+#
+#   LLMGuide.Admin.SystemPrompt
+#       Overrides the built-in GM Admin Mode system prompt. Leave empty to
+#       use the default (explains full SQL/SOAP authority, no confirmation
+#       step, and to avoid destructive actions unless clearly requested).
+#       Default: (empty — use built-in prompt)
+#
+LLMGuide.Admin.SystemPrompt =
+
+#
 #   LLMGuide.Bridge.PollIntervalSeconds
 #       How often the Python bridge checks for new questions
 #       Default: 2

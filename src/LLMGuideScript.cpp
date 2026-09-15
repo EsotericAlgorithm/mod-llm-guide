@@ -69,7 +69,7 @@ static constexpr uint32 DEFAULT_HISTORY_COUNT = 5;
 static constexpr uint32 MAX_HISTORY_COUNT = 10;
 
 // Forward declaration
-static bool SubmitQuestion(Player* player, const std::string& question, bool isWhisper = false);
+static bool SubmitQuestion(Player* player, const std::string& question, bool isWhisper = false, bool isAdmin = false);
 
 // Helper function to get class name
 static const char* GetClassName(uint8 classId)
@@ -1144,7 +1144,7 @@ static std::string BuildCharacterContext(Player* player)
 
 // Submit a question to the LLM queue
 // Returns true if question was submitted, false if rejected (cooldown, limit, etc.)
-static bool SubmitQuestion(Player* player, const std::string& questionStr, bool isWhisper)
+static bool SubmitQuestion(Player* player, const std::string& questionStr, bool isWhisper, bool isAdmin)
 {
     if (!sLLMGuideConfig->IsEnabled())
     {
@@ -1157,7 +1157,8 @@ static bool SubmitQuestion(Player* player, const std::string& questionStr, bool 
         if (isWhisper)
             ChatHandler(player->GetSession()).PSendSysMessage("Just whisper your question to AzerothGuide!");
         else
-            ChatHandler(player->GetSession()).PSendSysMessage("Usage: .ag <your question>");
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                isAdmin ? "Usage: .agm <admin request>" : "Usage: .ag <your question>");
         return false;
     }
 
@@ -1240,9 +1241,10 @@ static bool SubmitQuestion(Player* player, const std::string& questionStr, bool 
 
     // Insert into queue
     CharacterDatabase.Execute(
-        "INSERT INTO llm_guide_queue (character_guid, character_name, character_context, question, position_x, position_y, map_id, active_quest_ids, character_snapshot, status, created_at) "
-        "VALUES ({}, '{}', '{}', '{}', {}, {}, {}, '{}', '{}', 'pending', NOW())",
+        "INSERT INTO llm_guide_queue (character_guid, is_admin, character_name, character_context, question, position_x, position_y, map_id, active_quest_ids, character_snapshot, status, created_at) "
+        "VALUES ({}, {}, '{}', '{}', '{}', {}, {}, {}, '{}', '{}', 'pending', NOW())",
         guid,
+        isAdmin ? 1 : 0,
         escapedName,
         escapedContext,
         escapedQuestion,
@@ -1251,6 +1253,12 @@ static bool SubmitQuestion(Player* player, const std::string& questionStr, bool 
         mapId,
         activeQuestIdList,
         snapshot);
+
+    if (isAdmin)
+    {
+        LOG_INFO("module", "LLM Guide: ADMIN request from {} (SEC_ADMINISTRATOR): {}",
+            player->GetName(), questionStr);
+    }
 
     // Update cooldown
     playerCooldowns[guid] = now;
@@ -1839,6 +1847,9 @@ public:
         static ChatCommandTable commandTable =
         {
             { "ag", HandleAskCommand, SEC_PLAYER, Console::No },  // Shortcut: .ag
+            // GM Admin Mode: open-ended SQL + SOAP execution. Gated at the
+            // highest security level on purpose — see admin_tools.py.
+            { "agm", HandleAskAdminCommand, SEC_ADMINISTRATOR, Console::No },
         };
 
         return commandTable;
@@ -1856,6 +1867,26 @@ public:
             return true;
 
         SubmitQuestion(player, questionStr, false);
+        return true;
+    }
+
+    static bool HandleAskAdminCommand(ChatHandler* handler, Tail request)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        if (!player)
+            return false;
+
+        // Belt-and-suspenders: the command table already gates this at
+        // SEC_ADMINISTRATOR, but this tool can run arbitrary SQL/SOAP —
+        // never trust a single gate for that.
+        if (!player->GetSession() ||
+            player->GetSession()->GetSecurity() < SEC_ADMINISTRATOR)
+        {
+            handler->SendSysMessage("This command requires administrator privileges.");
+            return true;
+        }
+
+        SubmitQuestion(player, std::string(request), false, true);
         return true;
     }
 

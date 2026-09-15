@@ -221,7 +221,7 @@ class QueueTests(unittest.TestCase):
         bridge.call_llm = MagicMock()
         bridge.store_memory = MagicMock()
         bridge.process_request(self.cursor,
-                               (1, 2, 'Name', '', 'hello', 0, 0, 0, '', None))
+                               (1, 2, 'Name', '', 'hello', 0, 0, 0, '', None, 0))
         bridge.call_llm.assert_not_called()
         bridge.store_memory.assert_not_called()
 

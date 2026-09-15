@@ -29,6 +29,7 @@ from pathlib import Path
 # Add tools directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 from game_tools import GAME_TOOLS, GameToolExecutor
+from admin_tools import ADMIN_TOOLS
 from guide_reliability import ANSWER_RULES, decode_snapshot, requires_evidence
 from guide_routing import (
     CLARIFY_TOOL, CLARIFY_FALLBACK, ROUTING_PROMPT, exact_plan,
@@ -121,6 +122,17 @@ CONTEXT_TOOLS = export_tools([CONTEXT_TOOL])
 CONTEXT_TOOLS_OPENAI = convert_tools_to_openai_format(CONTEXT_TOOLS)
 ROUTING_TOOLS = export_tools([*GAME_TOOLS, CLARIFY_TOOL])
 ROUTING_TOOLS_OPENAI = convert_tools_to_openai_format(ROUTING_TOOLS)
+
+# GM Admin Mode only (`.agm`, SEC_ADMINISTRATOR-gated, see
+# LLMGuideScript.cpp): raw SQL + SOAP console access, on top of the
+# normal read-only game-data tools. Never used for a plain `.ag` request
+# — see LLMBridge.active_tools_provider/active_tools_openai, which stay
+# on the GAME_TOOLS_* sets by default and are only swapped to these for
+# the duration of one admin request.
+ADMIN_TOOLS_OPENAI = convert_tools_to_openai_format(ADMIN_TOOLS)
+ADMIN_TOOLS_PROVIDER = export_tools(ADMIN_TOOLS)
+ADMIN_GAME_TOOLS_PROVIDER = [*GAME_TOOLS_PROVIDER, *ADMIN_TOOLS_PROVIDER]
+ADMIN_GAME_TOOLS_OPENAI = [*GAME_TOOLS_OPENAI, *ADMIN_TOOLS_OPENAI]
 
 
 def extract_zone_from_context(char_context: str) -> str:
@@ -389,6 +401,35 @@ class LLMBridge:
             self.db_config, world_database=get_config_value(
                 config, "LLMGuide.Database.WorldName", "acore_world"))
         self.tool_executor.distance_unit = self.distance_unit
+
+        # Tool catalogs actually sent to the model. Default to the normal
+        # player-facing set; process_admin_request() swaps these to the
+        # ADMIN_GAME_TOOLS_* sets for the duration of one `.agm` request
+        # and always restores them afterward (see its try/finally).
+        self.active_tools_provider = GAME_TOOLS_PROVIDER
+        self.active_tools_openai = GAME_TOOLS_OPENAI
+
+        # GM Admin Mode: SOAP console access and the DB names raw SQL
+        # can target. Only consulted by admin_tools.py, only during an
+        # is_admin=1 request.
+        self.tool_executor.soap_config = {
+            'host': get_config_value(config, "LLMGuide.Soap.Host", "localhost"),
+            'port': get_config_int(config, "LLMGuide.Soap.Port", 7878),
+            'username': get_config_value(config, "LLMGuide.Soap.Username", ""),
+            'password': get_config_value(config, "LLMGuide.Soap.Password", ""),
+        }
+        self.tool_executor.admin_db_names = {
+            'world': get_config_value(
+                config, "LLMGuide.Database.WorldName", "acore_world"),
+            'characters': get_config_value(
+                config, "LLMGuide.Database.Name", "acore_characters"),
+            'auth': get_config_value(
+                config, "LLMGuide.Database.AuthName", "acore_auth"),
+            'playerbots': get_config_value(
+                config, "LLMGuide.Database.PlayerbotsName", "acore_playerbots"),
+        }
+        self.admin_system_prompt = get_config_value(
+            config, "LLMGuide.Admin.SystemPrompt", "").replace("\\n", "\n")
         self.request_timeout = max(10, get_config_int(
             config, "LLMGuide.Bridge.RequestTimeoutSeconds", 120))
         self.api_timeout = max(1, get_config_int(
@@ -543,6 +584,13 @@ class LLMBridge:
             add_column_if_missing(
                 cursor,
                 "llm_guide_queue",
+                "is_admin",
+                "TINYINT(1) NOT NULL DEFAULT 0",
+                after_column="character_guid",
+            )
+            add_column_if_missing(
+                cursor,
+                "llm_guide_queue",
                 "character_context",
                 "VARCHAR(500) DEFAULT NULL",
                 after_column="character_name",
@@ -630,7 +678,7 @@ class LLMBridge:
             SELECT q.id, q.character_guid, q.character_name,
                    q.character_context, q.question, q.position_x,
                    q.position_y, q.map_id, q.active_quest_ids,
-                   q.character_snapshot
+                   q.character_snapshot, q.is_admin
             FROM llm_guide_queue q
             WHERE q.status = 'pending' AND NOT EXISTS (
                 SELECT 1 FROM llm_guide_queue earlier
@@ -939,7 +987,7 @@ class LLMBridge:
                 messages=messages,
                 temperature=0 if routing else self.temperature,
                 **({"tools": CONTEXT_TOOLS if routing == 'context' else
-                    ROUTING_TOOLS if routing else GAME_TOOLS_PROVIDER,
+                    ROUTING_TOOLS if routing else self.active_tools_provider,
                     "tool_choice": {
                         "type": "any" if routing or (round_num == 0 and
                         requires_evidence(question) and not
@@ -1084,7 +1132,7 @@ class LLMBridge:
             tool_catalog = (
                 CONTEXT_TOOLS_OPENAI if routing == 'context'
                 else ROUTING_TOOLS_OPENAI if routing
-                else GAME_TOOLS_OPENAI
+                else self.active_tools_openai
             )
             request_kwargs = {
                 "model": model,
@@ -1383,13 +1431,19 @@ class LLMBridge:
     def process_request(self, cursor, request):
         """Process a single request."""
         (request_id, char_guid, char_name, char_context, question,
-         pos_x, pos_y, map_id, active_quest_ids, snapshot_raw) = request
+         pos_x, pos_y, map_id, active_quest_ids, snapshot_raw,
+         is_admin) = request
 
         logger.info(f"Processing request {request_id} from {char_name}: {question[:50]}...")
         if not self.mark_processing(cursor, request_id):
             return
         self.deadline = time.monotonic() + self.request_timeout
         self.conversation_context = None
+
+        if is_admin:
+            self.process_admin_request(
+                cursor, request_id, char_guid, char_name, question)
+            return
 
         try:
             snapshot = decode_snapshot(snapshot_raw)
@@ -1518,6 +1572,72 @@ class LLMBridge:
             for client in self.api_clients:
                 client.close()
             self.api_clients.clear()
+
+    def process_admin_request(
+        self, cursor, request_id, char_guid, char_name, question,
+    ):
+        """GM Admin Mode: open-ended SQL + SOAP execution.
+
+        Only ever reached for a `.agm` request the C++ side already
+        gated at SEC_ADMINISTRATOR and flagged `is_admin = 1` in
+        llm_guide_queue (see LLMGuideScript.cpp). Skips the normal
+        `.ag` pipeline entirely — no zone/quest/player-default tool
+        injection (this is an admin acting on the whole server, not a
+        player asking about their own character), no routing pass, and
+        no evidence/readiness grounding requirement (an executed action
+        is not a factual lookup that needs a citation). Every call is
+        still recorded to llm_guide_memory as an audit trail.
+        """
+        logger.warning(
+            f"ADMIN request {request_id} from {char_name}: {question}"
+        )
+        self.tool_executor.admin_tools = ADMIN_TOOLS
+        self.active_tools_provider = ADMIN_GAME_TOOLS_PROVIDER
+        self.active_tools_openai = ADMIN_GAME_TOOLS_OPENAI
+        try:
+            system_prompt = self.admin_system_prompt or (
+                "You are the Azeroth Guide operating in GM ADMIN MODE "
+                f"for {char_name}, this server's sole owner and "
+                "administrator on a private, solo AzerothCore server "
+                "with no other real players. You have full authority "
+                "to run arbitrary SQL against the world/characters/"
+                "auth/playerbots databases and arbitrary SOAP console "
+                "commands, exactly as a human admin could from the "
+                "in-game console. There is no confirmation step: every "
+                "execute_sql/execute_soap_command call runs "
+                "immediately and for real. Take the action the request "
+                "describes, verify it worked when practical (e.g. "
+                "re-query after a write), and reply with a short, "
+                "concrete summary of exactly what you did. Do not run "
+                "destructive commands (character/account deletion, "
+                "server shutdown, mass data changes) unless the "
+                "request clearly and specifically asks for that."
+            )
+            response, tokens, _ = self.call_llm(question, system_prompt)
+            self.remaining_timeout()
+        except Exception as e:
+            logger.error(f"Admin request {request_id} failed: {e}")
+            self.save_error(cursor, request_id, str(e))
+            return
+        finally:
+            self.tool_executor.admin_tools = []
+            self.active_tools_provider = GAME_TOOLS_PROVIDER
+            self.active_tools_openai = GAME_TOOLS_OPENAI
+            for client in self.api_clients:
+                client.close()
+            self.api_clients.clear()
+
+        response = response.strip() or "(no response text)"
+        if not self.save_response(cursor, request_id, response, tokens):
+            return
+        self.store_memory(
+            cursor, char_guid, char_name,
+            self.generate_summary(question, response),
+            question=question, response=response,
+        )
+        logger.info(
+            f"Admin request {request_id} completed ({tokens} tokens)"
+        )
 
     def validate_config(self) -> bool:
         """Validate the configuration."""

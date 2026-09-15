@@ -17,6 +17,7 @@ from guide_item_comparison import DEFAULT_ROLE_STATS
 from guide_services import SERVICE_PATTERNS
 from guide_readiness import AnswerReadiness
 from guide_presentation import compact_equipment_answer
+from admin_tools import AdminToolMixin, ADMIN_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -573,6 +574,7 @@ class GameToolExecutor(
     GuideToolQuestMixin,
     GuideToolItemMixin,
     GuideToolSharedMixin,
+    AdminToolMixin,
 ):
     """Executes game data tools by querying the database."""
 
@@ -739,6 +741,12 @@ class GameToolExecutor(
         self.upgrade_limit = 10
         self.upgrade_level_range = 30
         self.role_stats = DEFAULT_ROLE_STATS
+        # GM Admin Mode only: set to ADMIN_TOOLS by the bridge for the
+        # duration of one `.agm`-originated request, reset to [] right
+        # after. Never populated for a normal player `.ag` request.
+        self.admin_tools = []
+        self.soap_config = None
+        self.admin_db_names = {}
 
     def begin_request(self, snapshot, summary=''):
         self.snapshot = snapshot
@@ -1014,7 +1022,7 @@ class GameToolExecutor(
 
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         """Execute a tool and return results as a string."""
-        definition = next((tool for tool in GAME_TOOLS
+        definition = next((tool for tool in GAME_TOOLS + self.admin_tools
                            if tool['name'] == tool_name), None)
         if definition is None:
             return f"Unknown tool: {tool_name}"
@@ -1180,6 +1188,10 @@ class GameToolExecutor(
                 return self._get_quest_chain(tool_input)
             elif tool_name == "get_reputation_info":
                 return self._get_reputation_info(tool_input)
+            elif tool_name == "execute_sql":
+                return self._execute_sql(tool_input)
+            elif tool_name == "execute_soap_command":
+                return self._execute_soap_command(tool_input)
             else:
                 return f"Unknown tool: {tool_name}"
         except Exception as e:

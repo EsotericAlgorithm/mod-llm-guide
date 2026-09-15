@@ -8,6 +8,7 @@ DROP TABLE IF EXISTS `llm_guide_queue`;
 CREATE TABLE `llm_guide_queue` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `character_guid` INT UNSIGNED NOT NULL,
+  `is_admin` TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Set only by the SEC_ADMINISTRATOR-gated .agm command',
   `character_name` VARCHAR(12) NOT NULL,
   `character_context` VARCHAR(500) DEFAULT NULL COMMENT 'Player context: level, class, race, zone, etc.',
   `question` TEXT NOT NULL,
