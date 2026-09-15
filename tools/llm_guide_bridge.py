@@ -1591,6 +1591,14 @@ class LLMBridge:
         logger.warning(
             f"ADMIN request {request_id} from {char_name}: {question}"
         )
+        # Bug found live (2026-09-15): this path stored every Q&A to
+        # llm_guide_memory but never read it back, so each .agm request
+        # started with zero memory of prior turns even though plain .ag
+        # correctly replays recent history — the admin and player flows
+        # share the same table/character_guid, this path just wasn't
+        # querying it. Same fetch_memories() call the normal path uses.
+        memories = self.fetch_memories(cursor, char_guid)
+        recent = memories.get('recent', [])
         self.tool_executor.admin_tools = ADMIN_TOOLS
         self.active_tools_provider = ADMIN_GAME_TOOLS_PROVIDER
         self.active_tools_openai = ADMIN_GAME_TOOLS_OPENAI
@@ -1613,7 +1621,8 @@ class LLMBridge:
                 "server shutdown, mass data changes) unless the "
                 "request clearly and specifically asks for that."
             )
-            response, tokens, _ = self.call_llm(question, system_prompt)
+            response, tokens, _ = self.call_llm(
+                question, system_prompt, memories_recent=recent)
             self.remaining_timeout()
         except Exception as e:
             logger.error(f"Admin request {request_id} failed: {e}")
