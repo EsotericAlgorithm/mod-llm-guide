@@ -124,15 +124,32 @@ ROUTING_TOOLS = export_tools([*GAME_TOOLS, CLARIFY_TOOL])
 ROUTING_TOOLS_OPENAI = convert_tools_to_openai_format(ROUTING_TOOLS)
 
 # GM Admin Mode only (`.agm`, SEC_ADMINISTRATOR-gated, see
-# LLMGuideScript.cpp): raw SQL + SOAP console access, on top of the
-# normal read-only game-data tools. Never used for a plain `.ag` request
-# — see LLMBridge.active_tools_provider/active_tools_openai, which stay
-# on the GAME_TOOLS_* sets by default and are only swapped to these for
-# the duration of one admin request.
+# LLMGuideScript.cpp): raw SQL + SOAP console access. Never used for a
+# plain `.ag` request — see LLMBridge.active_tools_provider/
+# active_tools_openai, which stay on the GAME_TOOLS_* sets by default
+# and are only swapped to these for the duration of one admin request.
+#
+# Deliberately NOT the full GAME_TOOLS catalog plus admin tools — cost
+# measured live (2026-09-15): the full 33-tool catalog (~5100 tokens)
+# gets resent on *every* round of the tool loop, and an 11-round admin
+# request spent over half its 100k tokens just resending it. The other
+# 29 GAME_TOOLS are read-only lookups (find_vendor, get_item_info, ...)
+# that execute_sql can already answer directly with real DB access —
+# genuinely redundant for admin mode, not a capability loss. Kept
+# get_character_context alone since it's the cheap, direct way to
+# identify who's asking. Trimmed catalog: ~627 tokens/round.
 ADMIN_TOOLS_OPENAI = convert_tools_to_openai_format(ADMIN_TOOLS)
 ADMIN_TOOLS_PROVIDER = export_tools(ADMIN_TOOLS)
-ADMIN_GAME_TOOLS_PROVIDER = [*GAME_TOOLS_PROVIDER, *ADMIN_TOOLS_PROVIDER]
-ADMIN_GAME_TOOLS_OPENAI = [*GAME_TOOLS_OPENAI, *ADMIN_TOOLS_OPENAI]
+_CHARACTER_CONTEXT_TOOL = [
+    t for t in GAME_TOOLS if t['name'] == 'get_character_context'
+]
+ADMIN_GAME_TOOLS_PROVIDER = [
+    *export_tools(_CHARACTER_CONTEXT_TOOL), *ADMIN_TOOLS_PROVIDER,
+]
+ADMIN_GAME_TOOLS_OPENAI = [
+    *convert_tools_to_openai_format(_CHARACTER_CONTEXT_TOOL),
+    *ADMIN_TOOLS_OPENAI,
+]
 
 
 def extract_zone_from_context(char_context: str) -> str:
