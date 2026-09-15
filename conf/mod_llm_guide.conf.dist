@@ -517,6 +517,19 @@ LLMGuide.Soap.Password =
 LLMGuide.Admin.MaxTokens = 4000
 
 #
+#   LLMGuide.Admin.MaxToolRounds
+#       Tool-call round budget for .agm only. Deliberately separate from
+#       LLMGuide.Bridge.MaxToolRounds (default 5 — plenty for .ag's simple
+#       read-only lookups): multi-part admin requests (e.g. "max out my
+#       character" covering level, money, and gear across every slot) can
+#       need far more round trips. Once the last round is reached, tool
+#       calls are forcibly disabled — hitting that mid-task caused the
+#       model to announce an unstarted next step as its final answer with
+#       no error raised. Default: 15
+#
+LLMGuide.Admin.MaxToolRounds = 15
+
+#
 #   LLMGuide.Admin.SystemPrompt
 #       Overrides the built-in GM Admin Mode system prompt. Leave empty to
 #       use the default (explains full SQL/SOAP authority, no confirmation

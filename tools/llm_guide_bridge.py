@@ -382,11 +382,11 @@ class LLMBridge:
         # cap mid-final-answer after successfully executing several
         # actions, finish_reason='length', raised as "did not return a
         # complete answer" — the actions had already happened, just the
-        # confirmation text got cut off. active_max_tokens (below) is what
-        # every call actually reads; process_admin_request swaps it.
+        # confirmation text got cut off. process_admin_request swaps
+        # self.max_tokens to this value for the duration of one request
+        # and restores it afterward, same pattern as its tool-catalog swap.
         self.admin_max_tokens = get_config_int(
             config, "LLMGuide.Admin.MaxTokens", 4000)
-        self.active_max_tokens = self.max_tokens
         self.temperature = get_config_float(config, "LLMGuide.Temperature", 0.7)
         self.system_prompt = get_config_value(config, "LLMGuide.SystemPrompt",
             "You are a helpful WoW guide. Be concise.")
@@ -469,6 +469,17 @@ class LLMBridge:
             config, "LLMGuide.Bridge.RetryDelaySeconds", 1))
         self.max_tool_rounds = max(1, get_config_int(
             config, "LLMGuide.Bridge.MaxToolRounds", 5))
+        # GM Admin Mode gets its own, larger round budget — same reasoning
+        # as admin_max_tokens above. Found live (2026-09-15): "max out my
+        # character" (level + money + gear across every slot) burned
+        # through 5 rounds just on leveling/money, then the model hit the
+        # forced tool_choice="none" final round and announced "Now let me
+        # give you top-tier gear... let me add some BiS items:" with NO
+        # tool call left to actually do it — a dangling, unfinished
+        # response with no error raised (non-empty text, finish_reason=
+        # 'stop' looks like a normal complete answer to the code).
+        self.admin_max_tool_rounds = max(1, get_config_int(
+            config, "LLMGuide.Admin.MaxToolRounds", 15))
         self.routing_enabled = get_config_int(
             config, "LLMGuide.Routing.Enable", 1) == 1
         self.conversation_enabled = get_config_int(
@@ -1033,7 +1044,7 @@ class LLMBridge:
             # Make API call with tools
             response = self.provider_call(client.messages.create,
                 model=self.anthropic_model,
-                max_tokens=self.routing_max_tokens if routing else self.active_max_tokens,
+                max_tokens=self.routing_max_tokens if routing else self.max_tokens,
                 system=(system_prompt or self.system_prompt) + (
                     '' if routing else self.tool_executor.readiness_prompt()),
                 messages=messages,
@@ -1223,7 +1234,7 @@ class LLMBridge:
                 model,
                 int(
                     (self.routing_max_tokens if routing
-                     else self.active_max_tokens)
+                     else self.max_tokens)
                     * multiplier
                 ),
                 temperature=0 if routing else self.temperature,
@@ -1692,7 +1703,10 @@ class LLMBridge:
         self.tool_executor.admin_tools = ADMIN_TOOLS
         self.active_tools_provider = ADMIN_GAME_TOOLS_PROVIDER
         self.active_tools_openai = ADMIN_GAME_TOOLS_OPENAI
-        self.active_max_tokens = self.admin_max_tokens
+        saved_max_tokens = self.max_tokens
+        saved_max_tool_rounds = self.max_tool_rounds
+        self.max_tokens = self.admin_max_tokens
+        self.max_tool_rounds = self.admin_max_tool_rounds
         try:
             system_prompt = self.admin_system_prompt or (
                 "You are the Azeroth Guide operating in GM ADMIN MODE "
@@ -1710,7 +1724,18 @@ class LLMBridge:
                 "concrete summary of exactly what you did. Do not run "
                 "destructive commands (character/account deletion, "
                 "server shutdown, mass data changes) unless the "
-                "request clearly and specifically asks for that."
+                "request clearly and specifically asks for that. "
+                f"When the request says 'my character', 'me', or gives "
+                f"no name, it means {char_name} specifically — look up "
+                f"that exact character, never an arbitrary or "
+                "first-row-in-the-database guess. Only describe an "
+                "action as done if you actually called a tool for it "
+                "this turn — never narrate a next step ('now let me...', "
+                "'first, let me...') as your final sentence without "
+                "actually calling the tool for it. If you are running "
+                "low on remaining tool calls, finish the most important "
+                "part of the request completely and state plainly what "
+                "you did not get to, rather than trailing off mid-plan."
             )
             response, tokens, _ = self.call_llm(
                 question, system_prompt, memories_recent=recent)
@@ -1723,7 +1748,8 @@ class LLMBridge:
             self.tool_executor.admin_tools = []
             self.active_tools_provider = GAME_TOOLS_PROVIDER
             self.active_tools_openai = GAME_TOOLS_OPENAI
-            self.active_max_tokens = self.max_tokens
+            self.max_tokens = saved_max_tokens
+            self.max_tool_rounds = saved_max_tool_rounds
             for client in self.api_clients:
                 client.close()
             self.api_clients.clear()
