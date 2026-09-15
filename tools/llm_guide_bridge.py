@@ -1075,12 +1075,18 @@ class LLMBridge:
                 messages.append({"role": "user", "content": tool_results})
 
             else:
-                # No more tool calls - extract final text response
+                # No more tool calls - extract final text response.
+                # Same empty-response guard as call_openai — see there
+                # for why this must raise rather than return silently.
                 text = ""
                 for block in response.content:
                     if hasattr(block, 'text'):
                         text += block.text
-
+                if not text.strip():
+                    raise ValueError(
+                        "Provider returned no tool calls and no text "
+                        "(empty final message)"
+                    )
                 return text, total_tokens, tools_were_used
 
         # If we hit max rounds, return whatever we have
@@ -1312,8 +1318,19 @@ class LLMBridge:
                         "content": result
                     })
             else:
-                # No more tool calls - return final text response
+                # No more tool calls - return final text response.
+                # Bug found live (2026-09-15): an empty message here
+                # (no tool_calls, no content) used to be returned as-is,
+                # silently reaching the player as a bare "(no response
+                # text)" placeholder with nothing logged to explain why.
+                # Treat it the same as the finish_reason check above —
+                # a real failure, not a valid empty answer.
                 text = message.content or ""
+                if not text.strip():
+                    raise ValueError(
+                        "Provider returned no tool calls and no text "
+                        "(empty final message)"
+                    )
                 return text, total_tokens, tools_were_used
 
         # If we hit max rounds, return whatever we have
