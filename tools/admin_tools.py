@@ -5,16 +5,25 @@ normal player-facing `.ag` flow. They are only attached to a
 GameToolExecutor for the duration of a request that the C++ side has
 already gated at SEC_ADMINISTRATOR (the `.agm` command, see
 LLMGuideScript.cpp) and flagged `is_admin = 1` in `llm_guide_queue`.
-There is no allowlist here by design (Matt's call): the model can run
-any SQL statement against the configured AzerothCore databases or any
-SOAP console command, exactly as a human admin could from the console.
-Every call is logged (see GameToolExecutor._execute_sql/_execute_soap_command)
-for an after-the-fact audit trail, since nothing here asks for
-confirmation before acting.
+There is no allowlist on *data* statements here by design (Matt's call):
+the model can run any SELECT/INSERT/UPDATE/DELETE/REPLACE against the
+configured AzerothCore databases, or any SOAP console command, exactly as
+a human admin could from the console. Schema/privilege-mutating
+statements (ALTER/DROP/CREATE/RENAME/TRUNCATE/GRANT/REVOKE) ARE blocked
+in execute_sql (see _DDL_KEYWORDS below) — found live (2026-09-17) that
+an admin request drove the model to drop a column a hardcoded C++ query
+elsewhere depended on, and AzerothCore's DB layer treats an unknown-column
+error as unconditionally fatal (aborts the whole worldserver process, no
+config flag to make it non-fatal) — so a bad DDL statement here isn't
+just a bad query, it's a way to crash the server. Every call is logged
+(see GameToolExecutor._execute_sql/_execute_soap_command) for an
+after-the-fact audit trail, since nothing here asks for confirmation
+before acting.
 """
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 
@@ -22,19 +31,34 @@ from guide_soap import SoapError, call_soap_command
 
 logger = logging.getLogger(__name__)
 
+# Statement types that can mutate schema or privileges rather than just
+# data. Blocked in execute_sql regardless of database — matched as whole
+# words anywhere in the statement (not just the leading token) so a
+# stacked/chained statement can't sneak one past a leading SELECT/INSERT.
+_DDL_KEYWORDS = re.compile(
+    r"\b(ALTER|DROP|CREATE|RENAME|TRUNCATE|GRANT|REVOKE)\b",
+    re.IGNORECASE,
+)
+
 
 ADMIN_TOOLS = [
     {
         "name": "execute_sql",
         "description": (
             "Execute a raw SQL statement against a live AzerothCore "
-            "database (world, characters, or auth). No restrictions: "
-            "SELECT/INSERT/UPDATE/DELETE/ALTER all run for real, "
-            "immediately, with no confirmation and no undo. Use exact "
-            "table/column names — this server may be mid-migration on "
-            "some renamed columns (e.g. creature.id vs creature.id1); "
-            "check information_schema first if unsure. Returns affected "
-            "row count for writes, or up to 50 rows for SELECT."
+            "database (world, characters, or auth). No restrictions on "
+            "data statements: SELECT/INSERT/UPDATE/DELETE/REPLACE all run "
+            "for real, immediately, with no confirmation and no undo. "
+            "Schema/privilege statements (ALTER/DROP/CREATE/RENAME/"
+            "TRUNCATE/GRANT/REVOKE) are refused — this server's C++ side "
+            "has hardcoded queries against fixed table schemas, and an "
+            "unknown-column error crashes the entire game server with no "
+            "recovery, so schema changes are never worth the risk here. "
+            "Use exact table/column names — this server may be "
+            "mid-migration on some renamed columns (e.g. creature.id vs "
+            "creature.id1); check information_schema first if unsure. "
+            "Returns affected row count for writes, or up to 50 rows for "
+            "SELECT."
         ),
         "input_schema": {
             "type": "object",
@@ -128,6 +152,22 @@ class AdminToolMixin:
             return f"Unknown database: {database!r}"
         if not sql:
             return "Empty SQL statement."
+        ddl_match = _DDL_KEYWORDS.search(sql)
+        if ddl_match:
+            logger.warning(
+                "ADMIN SQL refused (schema/privilege statement, %s): %s",
+                ddl_match.group(1), sql,
+            )
+            return (
+                f"Refused: {ddl_match.group(1)} is a schema/privilege "
+                "statement, not data. This tool only runs "
+                "SELECT/INSERT/UPDATE/DELETE/REPLACE — schema changes are "
+                "blocked because this server's C++ side has hardcoded "
+                "queries against fixed table schemas, and an "
+                "unknown-column error crashes the entire game server. If "
+                "you genuinely need a schema change, tell the user "
+                "instead of trying to run it yourself."
+            )
 
         logger.warning(
             "ADMIN SQL [%s]: %s", database, sql
